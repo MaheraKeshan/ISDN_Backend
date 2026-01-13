@@ -58,8 +58,6 @@ app.use("/drivers", driverRouter);
 app.use("/notifications", notificationRoutes);
 
 
-// mongodb+srv://admin:123@cluster0.w4uhh.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0
-
 
 //app.delete("/",
     //(req,res)=> {res.json(
