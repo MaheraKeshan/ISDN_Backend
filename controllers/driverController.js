@@ -12,12 +12,21 @@ export async function getDrivers(req, res) {
 }
 
 // ✅ 2. Add New Driver (Directly - No User Account needed)
+// In controllers/driverController.js
+
 export async function addDriver(req, res) {
-    if (!req.user || (req.user.role !== "logistics" && req.user.role !== "admin")) {
-        return res.status(403).json({ message: "Access Denied" });
-    }
+    // ... validation checks ...
 
     try {
+        // 👇 TEMPORARY: Add this block to remove the old index
+        try {
+            await Driver.collection.dropIndex("userId_1");
+            console.log("✅ Old userId index dropped successfully");
+        } catch (e) {
+            // Index might not exist, or already dropped, which is fine
+        }
+        // 👆 END TEMPORARY BLOCK
+
         const newDriver = new Driver({
             name: req.body.name,
             vehicleNo: req.body.vehicleNo,
@@ -30,6 +39,7 @@ export async function addDriver(req, res) {
         res.status(201).json({ message: "Driver added to fleet", driver: newDriver });
 
     } catch (error) {
+        console.error("❌ Add Driver Error:", error);
         res.status(500).json({ message: "Failed to add driver", error: error.message });
     }
 }

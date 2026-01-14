@@ -1,6 +1,7 @@
 import Order from "../models/order.js";
 import Product from "../models/product.js";
 import sendInvoiceEmail from "../utils/invoice.js";
+import Driver from "../models/driver.js";
 
 // ✅ 1. Create a new order (Fixed orderId definition)
 export async function createOrder(req, res) {
@@ -306,5 +307,57 @@ export async function trackOrder(req, res) {
 
     } catch (err) {
         res.status(500).json({ message: "Server Error" });
+    }
+}
+
+
+
+// In controllers/orderController.js
+
+export async function markOrderDelivered(req, res) {
+    const { orderId } = req.params;
+
+    console.log("1. 🚚 Received Request to deliver Order:", orderId);
+
+    try {
+        // Debug checks
+        if (!Order) console.log("❌ CRITICAL: Order Model is undefined!");
+        if (!Driver) console.log("❌ CRITICAL: Driver Model is undefined!");
+
+        // 1. Find and Update Order
+        const order = await Order.findOneAndUpdate(
+            { orderId: orderId },
+            { status: "delivered" },
+            { new: true }
+        );
+
+        if (!order) {
+            console.log("❌ Order not found in DB:", orderId);
+            return res.status(404).json({ message: "Order not found" });
+        }
+        console.log("2. ✅ Order updated to Delivered");
+
+        // 2. Find and Update Driver
+        // Note: We search for the driver who has this 'currentOrderId'
+        const driver = await Driver.findOneAndUpdate(
+            { currentOrderId: orderId },
+            { 
+                status: "Available",
+                currentOrderId: null 
+            },
+            { new: true }
+        );
+
+        if (driver) {
+            console.log("3. ✅ Driver freed:", driver.name);
+        } else {
+            console.log("3. ⚠️ No driver was assigned to this order (or already freed).");
+        }
+
+        res.status(200).json({ message: "Delivery confirmed", order });
+
+    } catch (error) {
+        console.error("❌ SERVER CRASH:", error); // Check your VS Code Terminal for this line
+        res.status(500).json({ message: "Server Error", error: error.message });
     }
 }
