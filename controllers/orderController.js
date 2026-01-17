@@ -1,84 +1,63 @@
 import Order from "../models/order.js";
 import Product from "../models/product.js";
-import sendInvoiceEmail from "../utils/invoice.js";
+import sendInvoiceEmail from "../utils/invoice.js"; // Ensure this path matches your file structure
 import Driver from "../models/driver.js";
 
-// ✅ 1. Create a new order (Fixed orderId definition)
+// ✅ 1. Create a new order
 export async function createOrder(req, res) {
-    if (!req.user) {
-        return res.status(403).json({ message: "Please login first" });
-    }
+    if (!req.user) return res.status(403).json({ message: "Please login first" });
 
     const orderInfo = req.body;
+    const { paymentMethod, bankReceipt } = req.body;
 
-    // Auto-fill name if not provided
+    // --- VALIDATION: Bank Transfer must have a receipt ---
+    if (paymentMethod === 'bank' && !bankReceipt) {
+        return res.status(400).json({ message: "Bank transfer requires a receipt upload." });
+    }
+
     if (!orderInfo.name) {
         orderInfo.name = `${req.user.firstName} ${req.user.lastName}`;
     }
 
-    // ---------------------------------------------------------
-    // ✅ GENERATE ORDER ID (Moved logic here to ensure scope)
-    // ---------------------------------------------------------
-    let orderId = "CBC00001"; // Default start ID
-    
-    try {
-        // Find the last created order to increment the ID
-        const lastOrder = await Order.findOne().sort({ date: -1 });
-        
-        if (lastOrder) {
-            const lastOrderId = lastOrder.orderId; // e.g., "CBC00551"
-            
-            // Extract the number part safely
-            // Checks if ID starts with CBC to avoid parsing errors on legacy data
-            if (lastOrderId && lastOrderId.startsWith("CBC")) {
-                const lastOrderNumber = parseInt(lastOrderId.replace("CBC", ""), 10);
-                if (!isNaN(lastOrderNumber)) {
-                    const newOrderNumber = lastOrderNumber + 1;
-                    orderId = "CBC" + String(newOrderNumber).padStart(5, "0");
-                }
-            }
+    // Generate Order ID (CBC00001 format)
+    let orderId = "CBC00001";
+    const lastOrder = await Order.findOne().sort({ date: -1 });
+    if (lastOrder && lastOrder.orderId && lastOrder.orderId.startsWith("CBC")) {
+        const lastOrderNumber = parseInt(lastOrder.orderId.replace("CBC", ""), 10);
+        if (!isNaN(lastOrderNumber)) {
+            const newOrderNumber = lastOrderNumber + 1;
+            orderId = "CBC" + String(newOrderNumber).padStart(5, "0");
         }
-        // ---------------------------------------------------------
+    }
 
-
-        // Validate product list
-        if (!orderInfo.products || !Array.isArray(orderInfo.products) || orderInfo.products.length === 0) {
-            return res.status(400).json({ message: "No products provided in order" });
+    try {
+        if (!orderInfo.products || orderInfo.products.length === 0) {
+            return res.status(400).json({ message: "No products provided" });
         }
 
         let total = 0;
         let labelledTotal = 0;
         const products = [];
 
+        // Process Products
         for (let i = 0; i < orderInfo.products.length; i++) {
             const productData = orderInfo.products[i];
-
-            // Product Lookup (Custom ID -> Fallback to Mongo ID)
             let item = await Product.findOne({ productId: productData.productId });
             
+            // Fallback to MongoDB _id if custom ID fails
             if (!item) {
-                try {
-                    item = await Product.findById(productData.productId);
-                } catch (e) {
-                    // Ignore cast error
-                }
+                try { item = await Product.findById(productData.productId); } catch (e) { /* ignore */ }
             }
 
-            if (!item) {
-                return res.status(404).json({
-                    message: `Product with ID '${productData.productId}' not found.`,
-                });
-            }
+            if (!item) return res.status(404).json({ message: `Product '${productData.productId}' not found.` });
 
             products.push({
                 productInfo: {
                     productId: item.productId,
                     name: item.name,
-                    altNames: item.altNames,
-                    description: item.description,
                     image: item.image,
-                    labelledPrice: item.labelledPrice,
                     price: item.price,
+                    labelledPrice: item.labelledPrice
                 },
                 quantity: productData.qty,
             });
@@ -87,11 +66,13 @@ export async function createOrder(req, res) {
             labelledTotal += item.labelledPrice * productData.qty;
         }
 
-        const { paymentMethod, bankReceipt } = req.body;
+        // ✅ LOGIC: 
+        // If Bank Transfer -> Status is 'payment_review' (Admin must approve)
+        // If Card/COD -> Status is 'pending' (Order is placed immediately)
         const initialStatus = paymentMethod === 'bank' ? 'payment_review' : 'pending';
-
+        
         const order = new Order({
-            orderId: orderId, // ✅ This variable is now guaranteed to be defined
+            orderId,
             email: req.user.email,
             name: orderInfo.name,
             address: orderInfo.address,
@@ -101,17 +82,14 @@ export async function createOrder(req, res) {
             products,
             date: new Date(),
             
-            // Payment Data
+            // Payment Info
             paymentMethod,
-            bankReceipt: paymentMethod === 'bank' ? bankReceipt : null,
+            bankReceipt: paymentMethod === 'bank' ? bankReceipt : null, // Save the image
             paymentStatus: paymentMethod === 'card' ? 'Paid' : 'Pending',
 
-            // Status
+            // Order Status
             status: initialStatus,
-            originRDC: "Central RDC (Hub)",
-            driver: { name: "Pending Assignment", phone: "--", vehicleNo: "--" },
             
-            // Tracking History
             trackingHistory: [{ 
                 status: initialStatus === 'payment_review' ? "Waiting for Payment Verification" : "Order Placed", 
                 date: new Date(), 
@@ -121,30 +99,84 @@ export async function createOrder(req, res) {
 
         const createdOrder = await order.save();
 
-        // Send Email
+        // Send Email (Invoice)
         try { await sendInvoiceEmail(createdOrder, req.user); } catch (e) { console.error(e) }
 
         return res.status(200).json({
-            message: "Order created successfully",
+            message: initialStatus === 'payment_review' 
+                ? "Order received. Waiting for payment approval." 
+                : "Order placed successfully",
             orderId: createdOrder.orderId,
         });
 
     } catch (err) {
         console.error("Error creating order:", err);
-        return res.status(500).json({
-            message: "Failed to create order",
-            error: err.message,
-        });
+        return res.status(500).json({ message: "Failed to create order", error: err.message });
     }
 }
 
-// ✅ 2. Get order(s)
+// ... (Keep your createOrder function exactly as it is) ...
+
+export async function updatePaymentStatus(req, res) {
+    if (!req.user || req.user.role !== "admin") {
+        return res.status(403).json({ message: "Admin access required" });
+    }
+
+    const { orderId } = req.params;
+    const { status } = req.body; // "Paid" or "Rejected"
+
+    if (!["Paid", "Rejected"].includes(status)) {
+        return res.status(400).json({ message: "Invalid payment status" });
+    }
+
+    try {
+        const update = {
+            paymentStatus: status,
+            status: status === "Paid" ? "pending" : "canceled",
+            $push: {
+                trackingHistory: {
+                    status:
+                        status === "Paid"
+                            ? "Payment Verified - Order Placed"
+                            : "Payment Rejected - Order Cancelled",
+                    date: new Date(),
+                    completed: true
+                }
+            }
+        };
+
+        const order = await Order.findOneAndUpdate(
+            { orderId },
+            update,
+            { new: true } // return updated document
+        );
+
+        if (!order) {
+            return res.status(404).json({ message: "Order not found" });
+        }
+
+        return res.json({
+            message: `Payment ${status}`,
+            order
+        });
+
+    } catch (err) {
+        console.error("❌ PAYMENT UPDATE ERROR:", err);
+        return res.status(500).json({ message: err.message });
+    }
+}
+
+
+// ... (Keep getOrder, sendQuote, updateOrderStatus, markOrderDelivered, trackOrder as they are) ...
+
+// ✅ 3. Get order(s)
 export async function getOrder(req, res) {
     if (!req.user) {
         return res.status(403).json({ message: "Please login first" });
     }
 
     try {
+        // Admin/Staff see all, Customer sees own
         if (["admin", "rdc_staff", "logistics"].includes(req.user.role)) {
             const orders = await Order.find().sort({ date: -1 });
             return res.json(orders);
@@ -158,51 +190,6 @@ export async function getOrder(req, res) {
             message: "Failed to fetch order(s)",
             error: err.message,
         });
-    }
-}
-
-// ✅ 3. Update Payment Status (Admin Only)
-export async function updatePaymentStatus(req, res) {
-    if (!req.user || req.user.role !== "admin") {
-        return res.status(403).json({ message: "Access Denied" });
-    }
-
-    const { orderId } = req.params;
-    const { status } = req.body; 
-
-    try {
-        const order = await Order.findOne({ orderId });
-        if (!order) return res.status(404).json({ message: "Order not found" });
-
-        order.paymentStatus = status;
-
-        if (status === "Paid" && order.status === "payment_review") {
-            order.status = "pending";
-            order.trackingHistory.push({
-                status: "Payment Verified",
-                date: new Date(),
-                completed: true
-            });
-            order.trackingHistory.push({
-                status: "Order Placed",
-                date: new Date(),
-                completed: true
-            });
-        }
-        else if (status === "Rejected") {
-            order.status = "canceled";
-            order.trackingHistory.push({
-                status: "Payment Rejected",
-                date: new Date(),
-                completed: true
-            });
-        }
-
-        await order.save();
-        res.json({ message: `Payment updated to ${status}`, order });
-
-    } catch (err) {
-        res.status(500).json({ message: "Update failed" });
     }
 }
 
@@ -246,7 +233,6 @@ export async function updateOrderStatus(req, res) {
         }
 
         order.status = status;
-        
         order.trackingHistory.push({
             status: status.charAt(0).toUpperCase() + status.slice(1),
             date: new Date(),
@@ -254,7 +240,6 @@ export async function updateOrderStatus(req, res) {
         });
 
         await order.save();
-
         res.json({ message: `Order status updated to ${status}`, order });
 
     } catch (err) {
@@ -262,7 +247,60 @@ export async function updateOrderStatus(req, res) {
     }
 }
 
-// ✅ 6. Track Order
+// ✅ 6. Mark Delivered (Logistics)
+export async function markOrderDelivered(req, res) {
+    const { orderId } = req.params;
+
+    console.log("1. 🚚 Received Request to deliver Order:", orderId);
+
+    try {
+        // 1. Find and Update Order
+        const order = await Order.findOneAndUpdate(
+            { orderId: orderId },
+            { 
+                status: "delivered",
+                $push: { 
+                    trackingHistory: { 
+                        status: "Delivered", 
+                        date: new Date(), 
+                        completed: true 
+                    } 
+                }
+            },
+            { new: true }
+        );
+
+        if (!order) {
+            console.log("❌ Order not found in DB:", orderId);
+            return res.status(404).json({ message: "Order not found" });
+        }
+        console.log("2. ✅ Order updated to Delivered");
+
+        // 2. Find and Update Driver (Free them up)
+        const driver = await Driver.findOneAndUpdate(
+            { currentOrderId: orderId },
+            { 
+                status: "Available",
+                currentOrderId: null 
+            },
+            { new: true }
+        );
+
+        if (driver) {
+            console.log("3. ✅ Driver freed:", driver.name);
+        } else {
+            console.log("3. ⚠️ No driver was assigned to this order (or already freed).");
+        }
+
+        res.status(200).json({ message: "Delivery confirmed", order });
+
+    } catch (error) {
+        console.error("❌ SERVER CRASH:", error);
+        res.status(500).json({ message: "Server Error", error: error.message });
+    }
+}
+
+// ✅ 7. Track Order
 export async function trackOrder(req, res) {
     const { orderId } = req.params;
 
@@ -275,7 +313,7 @@ export async function trackOrder(req, res) {
 
         const currentStatus = order.status.toLowerCase();
 
-        // Dynamic Timeline
+        // Dynamic Timeline based on current status
         const timeline = [
             { status: "Order Placed", date: order.date, completed: true },
             { status: "Processing", date: null, completed: ["processing", "dispatched", "in transit", "delivered"].includes(currentStatus) },
@@ -283,6 +321,11 @@ export async function trackOrder(req, res) {
             { status: "In Transit", date: null, completed: ["in transit", "delivered"].includes(currentStatus), current: currentStatus === "in transit" },
             { status: "Delivered", date: null, completed: currentStatus === "delivered" }
         ];
+        
+        // If in payment review, show special status
+        if (currentStatus === 'payment_review') {
+             timeline[0].status = "Waiting for Payment Verification";
+        }
 
         const trackingData = {
             id: order.orderId,
@@ -307,57 +350,5 @@ export async function trackOrder(req, res) {
 
     } catch (err) {
         res.status(500).json({ message: "Server Error" });
-    }
-}
-
-
-
-// In controllers/orderController.js
-
-export async function markOrderDelivered(req, res) {
-    const { orderId } = req.params;
-
-    console.log("1. 🚚 Received Request to deliver Order:", orderId);
-
-    try {
-        // Debug checks
-        if (!Order) console.log("❌ CRITICAL: Order Model is undefined!");
-        if (!Driver) console.log("❌ CRITICAL: Driver Model is undefined!");
-
-        // 1. Find and Update Order
-        const order = await Order.findOneAndUpdate(
-            { orderId: orderId },
-            { status: "delivered" },
-            { new: true }
-        );
-
-        if (!order) {
-            console.log("❌ Order not found in DB:", orderId);
-            return res.status(404).json({ message: "Order not found" });
-        }
-        console.log("2. ✅ Order updated to Delivered");
-
-        // 2. Find and Update Driver
-        // Note: We search for the driver who has this 'currentOrderId'
-        const driver = await Driver.findOneAndUpdate(
-            { currentOrderId: orderId },
-            { 
-                status: "Available",
-                currentOrderId: null 
-            },
-            { new: true }
-        );
-
-        if (driver) {
-            console.log("3. ✅ Driver freed:", driver.name);
-        } else {
-            console.log("3. ⚠️ No driver was assigned to this order (or already freed).");
-        }
-
-        res.status(200).json({ message: "Delivery confirmed", order });
-
-    } catch (error) {
-        console.error("❌ SERVER CRASH:", error); // Check your VS Code Terminal for this line
-        res.status(500).json({ message: "Server Error", error: error.message });
     }
 }
