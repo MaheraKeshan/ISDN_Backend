@@ -1,5 +1,7 @@
 import Order from "../models/order.js";
 
+
+
 // ✅ Get Admin KPI Stats
 export async function getKPIStats(req, res) {
     // Security: Admin Only
@@ -16,7 +18,6 @@ export async function getKPIStats(req, res) {
         const totalOrders = totalRevenueData[0]?.count || 0;
 
         // 2. RDC Performance (Workload)
-        // Counts how many non-pending orders each RDC is handling
         const rdcPerformance = await Order.aggregate([
             { $match: { status: { $ne: "pending" } } }, 
             { $group: { _id: "$originRDC", count: { $sum: 1 } } },
@@ -24,9 +25,14 @@ export async function getKPIStats(req, res) {
         ]);
 
         // 3. Driver Performance (Logistics)
-        // Counts completed deliveries per driver
+        // ✅ FIX: Filter out "Pending Assignment" so it doesn't show in the leaderboard
         const driverPerformance = await Order.aggregate([
-            { $match: { status: "delivered" } },
+            { 
+                $match: { 
+                    status: "delivered",
+                    "driver.name": { $ne: "Pending Assignment" } // <--- ADDED THIS LINE
+                } 
+            },
             { $group: { _id: "$driver.name", deliveries: { $sum: 1 } } },
             { $sort: { deliveries: -1 } },
             { $limit: 10 } // Top 10 Drivers
